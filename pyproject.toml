@@ -1,0 +1,12 @@
+[project]
+name = "s3-upload-demo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40.24",
+    "fastapi[standard]>=0.116.1",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.10.1",
+]
