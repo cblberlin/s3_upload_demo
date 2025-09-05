@@ -23,10 +23,14 @@ async def upload_single_file(
     upload_service: UploadService = Depends(get_upload_service)
 ):
     """
-    上传单个文件
+    智能单文件上传
     
     - **file**: 要上传的文件
     - **user_id**: 可选的用户ID，用于文件路径分组
+    
+    注意：
+    - 小文件(<100MB)：使用标准上传
+    - 大文件(>=100MB)：自动使用分块上传
     """
     try:
         result = await upload_service.upload_single_file(file, user_id)
@@ -37,6 +41,32 @@ async def upload_single_file(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error in single file upload: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/single/stream", response_model=UploadResponse)
+async def upload_single_file_with_progress(
+    file: UploadFile = File(...),
+    user_id: Optional[str] = Form(None),
+    upload_service: UploadService = Depends(get_upload_service)
+):
+    """
+    带进度的单文件上传（强制使用分块上传）
+    
+    - **file**: 要上传的文件
+    - **user_id**: 可选的用户ID，用于文件路径分组
+    
+    注意：无论文件大小，都使用分块上传，便于前端显示进度
+    """
+    try:
+        result = await upload_service.upload_single_file_with_progress(file, user_id)
+        return result
+    except (FileSizeExceedError, FileTypeNotAllowedError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except UploadFailedError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in progressive file upload: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

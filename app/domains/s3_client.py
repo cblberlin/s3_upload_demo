@@ -254,6 +254,22 @@ class S3Client:
             logger.error(f"Failed to complete multipart upload for {key}: {e}")
             raise S3OperationError(f"Complete multipart upload failed: {e}")
 
+    async def upload_part(self, key: str, upload_id: str, part_number: int, 
+                         data: bytes) -> str:
+        """上传单个分块"""
+        try:
+            response = self.client.upload_part(
+                Bucket=self.bucket,
+                Key=key,
+                UploadId=upload_id,
+                PartNumber=part_number,
+                Body=data
+            )
+            return response['ETag'].strip('"')
+        except ClientError as e:
+            logger.error(f"Failed to upload part {part_number} for {key}: {e}")
+            raise S3OperationError(f"Upload part failed: {e}")
+
     async def abort_multipart_upload(self, key: str, upload_id: str) -> bool:
         """中止分块上传"""
         try:

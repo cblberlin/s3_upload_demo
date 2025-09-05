@@ -14,7 +14,6 @@ from app.core.exceptions import (
     UploadFailedError, ChunkUploadError
 )
 
-
 class UploadService:
     def __init__(self, s3_client: S3Client):
         self.s3_client = s3_client
@@ -202,6 +201,48 @@ class UploadService:
         except Exception as e:
             logger.error(f"Failed to abort chunk upload: {e}")
             return False
+
+    async def upload_single_file_with_progress(self, file: UploadFile, 
+                                             user_id: str = None) -> UploadResponse:
+        """带进度的单文件上传（强制使用分块上传）"""
+        try:
+            # 获取文件大小
+            file_size = await self._get_file_size(file)
+            
+            # 验证文件
+            self._validate_file(file.filename, file_size)
+            
+            # 生成文件键
+            file_key = self._generate_file_key(file.filename, user_id)
+            
+            # 准备元数据
+            metadata = {
+                'original_name': file.filename,
+                'upload_method': 'multipart_progressive',
+                'file_size': str(file_size)
+            }
+            if user_id:
+                metadata['user_id'] = user_id
+            
+            # 强制使用分块上传以便显示进度
+            logger.info(f"Using progressive multipart upload for file: {file.filename} ({file_size} bytes)")
+            result = await self._upload_large_file_auto(file, file_key, metadata)
+            
+            logger.info(f"Successfully uploaded file with progress: {file_key}")
+            
+            return UploadResponse(
+                success=True,
+                message="File uploaded successfully with progress tracking",
+                file_key=file_key,
+                file_url=result['url']
+            )
+            
+        except (FileSizeExceedError, FileTypeNotAllowedError) as e:
+            logger.warning(f"File validation failed: {e}")
+            return UploadResponse(success=False, message=str(e))
+        except Exception as e:
+            logger.error(f"Progressive upload failed: {e}")
+            raise UploadFailedError(f"Progressive upload failed: {e}")
 
     def calculate_chunks(self, file_size: int, chunk_size: int = None) -> Dict[str, int]:
         """计算分块信息"""
