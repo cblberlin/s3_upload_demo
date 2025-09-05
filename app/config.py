@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     
     # App Configuration
     max_file_size: int = 1024 * 1024 * 1024  # 1024MB
-    chunk_size: int = 8 * 1024 * 1024       # 8MB
+    chunk_size: int = 25 * 1024 * 1024       # 25MB
     allowed_extensions: str = "jpg,jpeg,png,gif,pdf,txt,doc,docx,zip,mkv,mp4,mp3,xlsx,xls,csv,ppt,pptx" # all files
     
     # API Configuration

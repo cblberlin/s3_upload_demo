@@ -17,6 +17,8 @@ from app.core.exceptions import (
 class UploadService:
     def __init__(self, s3_client: S3Client):
         self.s3_client = s3_client
+        # 设置分块上传的阈值，100MB
+        self.multipart_threshold = 100 * 1024 * 1024  # 100MB
 
     def _validate_file(self, filename: str, file_size: int) -> None:
         """验证文件"""
@@ -50,13 +52,92 @@ class UploadService:
         safe_filename = filename.replace(' ', '_')
         return f"{base_path}/{file_id}_{safe_filename}"
 
+    async def _get_file_size(self, file: UploadFile) -> int:
+        """获取文件大小而不读取全部内容"""
+        # 保存当前位置
+        current_pos = file.file.tell()
+        
+        # 移动到文件末尾获取大小
+        file.file.seek(0, 2)  # 移动到末尾
+        file_size = file.file.tell()
+        
+        # 恢复到原始位置
+        file.file.seek(current_pos)
+        
+        return file_size
+
+    async def _upload_small_file(self, file: UploadFile, file_key: str, 
+                               metadata: Dict[str, str]) -> Dict[str, str]:
+        """小文件直接上传"""
+        result = await self.s3_client.upload_file(
+            file_obj=file.file,
+            key=file_key,
+            content_type=file.content_type,
+            metadata=metadata
+        )
+        return result
+
+    async def _upload_large_file_multipart(self, file: UploadFile, file_key: str, 
+                                         metadata: Dict[str, str]) -> Dict[str, str]:
+        """大文件分块上传"""
+        # 创建分块上传
+        upload_id = await self.s3_client.create_multipart_upload(
+            key=file_key,
+            content_type=file.content_type
+        )
+        
+        parts = []
+        part_number = 1
+        chunk_size = getattr(settings, 'chunk_size', 25 * 1024 * 1024)  # 默认25MB
+        
+        try:
+            while True:
+                # 读取分块数据
+                chunk = file.file.read(chunk_size)
+                if not chunk:
+                    break
+                
+                # 上传分块
+                etag = await self.s3_client.upload_part(
+                    key=file_key,
+                    upload_id=upload_id,
+                    part_number=part_number,
+                    data=chunk
+                )
+                
+                parts.append({
+                    'ETag': etag,
+                    'PartNumber': part_number
+                })
+                
+                part_number += 1
+                logger.info(f"Uploaded part {part_number - 1} for {file_key}")
+            
+            # 完成分块上传
+            await self.s3_client.complete_multipart_upload(
+                key=file_key,
+                upload_id=upload_id,
+                parts=parts
+            )
+            
+            # 返回与单文件上传相同格式的结果
+            return {
+                'key': file_key,
+                'bucket': self.s3_client.bucket,
+                'url': f"{settings.s3_endpoint_url}/{self.s3_client.bucket}/{file_key}"
+            }
+            
+        except Exception as e:
+            # 出错时中止上传
+            await self.s3_client.abort_multipart_upload(file_key, upload_id)
+            raise e
+
     async def upload_single_file(self, file: UploadFile, 
                                user_id: str = None) -> UploadResponse:
-        """单文件上传"""
+        """智能单文件上传 - 根据文件大小自动选择上传方式"""
         try:
-            # 读取文件内容获取大小
-            content = await file.read()
-            file_size = len(content)
+            # 获取文件大小（不读取全部内容）
+            file_size = await self._get_file_size(file)
             
             # 验证文件
             self._validate_file(file.filename, file_size)
@@ -64,25 +145,26 @@ class UploadService:
             # 生成文件键
             file_key = self._generate_file_key(file.filename, user_id)
             
-            # 重置文件指针
-            await file.seek(0)
+            # 重置文件指针到开始
+            file.file.seek(0)
             
             # 准备元数据
             metadata = {
                 'original_name': file.filename,
-                'upload_method': 'single',
                 'file_size': str(file_size)
             }
             if user_id:
                 metadata['user_id'] = user_id
             
-            # 上传到S3
-            result = await self.s3_client.upload_file(
-                file_obj=file.file,
-                key=file_key,
-                content_type=file.content_type,
-                metadata=metadata
-            )
+            # 根据文件大小选择上传方式
+            if file_size >= self.multipart_threshold:
+                logger.info(f"Using multipart upload for large file: {file.filename} ({file_size} bytes)")
+                metadata['upload_method'] = 'multipart'
+                result = await self._upload_large_file_multipart(file, file_key, metadata)
+            else:
+                logger.info(f"Using standard upload for small file: {file.filename} ({file_size} bytes)")
+                metadata['upload_method'] = 'single'
+                result = await self._upload_small_file(file, file_key, metadata)
             
             logger.info(f"Successfully uploaded file: {file_key}")
             
@@ -215,6 +297,9 @@ class UploadService:
             # 生成文件键
             file_key = self._generate_file_key(file.filename, user_id)
             
+            # 重置文件指针
+            file.file.seek(0)
+            
             # 准备元数据
             metadata = {
                 'original_name': file.filename,
@@ -226,7 +311,7 @@ class UploadService:
             
             # 强制使用分块上传以便显示进度
             logger.info(f"Using progressive multipart upload for file: {file.filename} ({file_size} bytes)")
-            result = await self._upload_large_file_auto(file, file_key, metadata)
+            result = await self._upload_large_file_multipart(file, file_key, metadata)
             
             logger.info(f"Successfully uploaded file with progress: {file_key}")
             
@@ -247,7 +332,7 @@ class UploadService:
     def calculate_chunks(self, file_size: int, chunk_size: int = None) -> Dict[str, int]:
         """计算分块信息"""
         if chunk_size is None:
-            chunk_size = settings.chunk_size
+            chunk_size = getattr(settings, 'chunk_size', 25 * 1024 * 1024)  # 默认25MB
             
         total_chunks = (file_size + chunk_size - 1) // chunk_size
         
